@@ -156,7 +156,9 @@ function fulfillmentActivityMs(order: OrderView, queue: FulfillmentQueueKey) {
     ? [order.createdAt]
     : queue === "shipped"
       ? [order.latestShipmentEventAt, order.pickedUpAt, order.createdAt]
-      : [order.updatedAt, order.pickedUpAt, order.manifestedAt, order.createdAt];
+      : queue === "labels-generated"
+        ? [order.latestLabelEventAt, order.manifestedAt, order.createdAt]
+        : [order.updatedAt, order.pickedUpAt, order.manifestedAt, order.createdAt];
   return Math.max(...timestamps.map((value) => validDate(value)?.getTime() ?? 0));
 }
 function detectInitialTheme(): "light" | "dark" {
@@ -180,7 +182,8 @@ export default function OperationsApp() {
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [fulfillmentLoadError, setFulfillmentLoadError] = useState("");
-  const fulfillmentInFlightRef = useRef(new Set<FulfillmentQueueKey>());
+  const fulfillmentInFlightRef = useRef(new Map<string, Promise<FulfillmentQueuePage | null>>());
+  const fulfillmentPrimeStartedRef = useRef(false);
   const loadInFlightRef = useRef<Promise<void> | null>(null);
 
   const load = useCallback(async (preserveLoadedOrders = false) => {
@@ -229,33 +232,50 @@ export default function OperationsApp() {
   useOrderEvents(() => load(view === "fulfillment").catch(() => undefined));
 
   const loadMoreFulfillmentOrders = useCallback(async (queue: FulfillmentQueueKey, offset: number, sort: FulfillmentSortKey): Promise<FulfillmentQueuePage | null> => {
-    if (fulfillmentInFlightRef.current.has(queue)) return null;
-    fulfillmentInFlightRef.current.add(queue);
-    setFulfillmentLoadError("");
-    const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 45_000);
+    const requestKey = `${queue}:${sort}:${offset}`;
+    const existing = fulfillmentInFlightRef.current.get(requestKey);
+    if (existing) return existing;
+    const pending = (async () => {
+      setFulfillmentLoadError("");
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 45_000);
+      try {
+        const pageSize = offset === 0 ? 25 : 75;
+        const response = await fetch(`/api/state?scope=orders&queue=${encodeURIComponent(queue)}&sort=${encodeURIComponent(sort)}&limit=${pageSize}&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+        if (response.status === 401) { window.location.href = "/login"; return null; }
+        if (!response.ok) throw new Error("Could not load the next fulfillment page");
+        const snapshot = await response.json() as DashboardSnapshot;
+        setData((current) => {
+          if (!current) return snapshot;
+          const incoming = new Map(snapshot.orders.map((order) => [order.id, order]));
+          const merged = current.orders.map((order) => incoming.get(order.id) ?? order);
+          const known = new Set(current.orders.map((order) => order.id));
+          return { ...current, orders: [...merged, ...snapshot.orders.filter((order) => !known.has(order.id))], fulfillmentCounts: snapshot.fulfillmentCounts };
+        });
+        return { nextOffset: snapshot.orderPagination.nextOffset, hasMore: snapshot.orderPagination.hasMore };
+      } catch {
+        setFulfillmentLoadError("The next set of orders could not be loaded. Please retry.");
+        return null;
+      } finally {
+        window.clearTimeout(timeout);
+      }
+    })();
+    fulfillmentInFlightRef.current.set(requestKey, pending);
     try {
-      const pageSize = offset === 0 ? 25 : 75;
-      const response = await fetch(`/api/state?scope=orders&queue=${encodeURIComponent(queue)}&sort=${encodeURIComponent(sort)}&limit=${pageSize}&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
-      if (response.status === 401) { window.location.href = "/login"; return null; }
-      if (!response.ok) throw new Error("Could not load the next fulfillment page");
-      const snapshot = await response.json() as DashboardSnapshot;
-      setData((current) => {
-        if (!current) return snapshot;
-        const incoming = new Map(snapshot.orders.map((order) => [order.id, order]));
-        const merged = current.orders.map((order) => incoming.get(order.id) ?? order);
-        const known = new Set(current.orders.map((order) => order.id));
-        return { ...current, orders: [...merged, ...snapshot.orders.filter((order) => !known.has(order.id))], fulfillmentCounts: snapshot.fulfillmentCounts };
-      });
-      return { nextOffset: snapshot.orderPagination.nextOffset, hasMore: snapshot.orderPagination.hasMore };
-    } catch {
-      setFulfillmentLoadError("The next set of orders could not be loaded. Please retry.");
-      return null;
+      return await pending;
     } finally {
-      window.clearTimeout(timeout);
-      fulfillmentInFlightRef.current.delete(queue);
+      if (fulfillmentInFlightRef.current.get(requestKey) === pending) fulfillmentInFlightRef.current.delete(requestKey);
     }
   }, []);
+
+  useEffect(() => {
+    if (!data || fulfillmentPrimeStartedRef.current || !["ADMIN", "MANAGER", "OPERATIONS", "WAREHOUSE"].includes(data.currentUser.role)) return;
+    fulfillmentPrimeStartedRef.current = true;
+    void Promise.all([
+      loadMoreFulfillmentOrders("labels-generated", 0, "activity-desc"),
+      loadMoreFulfillmentOrders("shipped", 0, "activity-desc"),
+    ]);
+  }, [data, loadMoreFulfillmentOrders]);
 
   async function request(path: string, options: RequestInit, success: string, timeoutMs = 30_000) {
     setBusy(path);
@@ -1230,7 +1250,7 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
     all: { initialized: false, nextOffset: 0, hasMore: true },
   });
   const [queueLoading, setQueueLoading] = useState<Record<FulfillmentQueueKey, boolean>>({ "new-orders": false, "labels-generated": false, shipped: false, "confirmed-orders": false, all: false });
-  const [fulfillmentSort, setFulfillmentSort] = useState<FulfillmentSortKey>("order-asc");
+  const [fulfillmentSort, setFulfillmentSort] = useState<FulfillmentSortKey>("activity-desc");
   const [selected, setSelected] = useState<string[]>([]);
   const [manifesting, setManifesting] = useState(false);
   const [queueSearch, setQueueSearch] = useState("");
@@ -1461,7 +1481,7 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
               setFulfillmentSort(nextSort);
               setQueuePages({ "new-orders": { initialized: false, nextOffset: 0, hasMore: true }, "labels-generated": { initialized: false, nextOffset: 0, hasMore: true }, shipped: { initialized: false, nextOffset: 0, hasMore: true }, "confirmed-orders": { initialized: false, nextOffset: 0, hasMore: true }, all: { initialized: false, nextOffset: 0, hasMore: true } });
               setSelected([]);
-            }}><option value="order-asc">Order ID: ascending</option><option value="activity-desc">Latest activity first</option></select></label>
+            }}><option value="activity-desc">Latest activity first</option><option value="order-asc">Order ID: ascending</option></select></label>
             <div className="fulfillment-action-popover-wrap"><button className="small-button fulfillment-bulk-button" disabled={!bulkOrders.length} onClick={() => void copyOrderNumbers()}><Clipboard size={15} /> Copy IDs</button>{bulkStatus?.kind === "copy" && <span className="fulfillment-action-popover" role="status">{bulkStatus.message}</span>}</div>
             <div className="fulfillment-action-popover-wrap"><button className="small-button fulfillment-bulk-button" disabled={!bulkOrders.length} onClick={exportShipmentSheet}><Download size={15} /> Export sheet</button>{bulkStatus?.kind === "export" && <span className="fulfillment-action-popover" role="status">{bulkStatus.message}</span>}</div>
             
@@ -1486,7 +1506,7 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
               <td className="fulfillment-sticky-order">
                 <div className="fulfillment-order-block">
                   <strong>{order.orderNumber}</strong>
-                  <span>{currency.format(order.amount / 100)} · {activeQueue === "shipped" ? `Shipment updated ${age(order.latestShipmentEventAt || order.pickedUpAt || order.createdAt)} ago` : `${age(order.createdAt)} old`}</span>
+                  <span>{currency.format(order.amount / 100)} · {activeQueue === "shipped" ? `Shipment updated ${age(order.latestShipmentEventAt || order.pickedUpAt || order.createdAt)} ago` : activeQueue === "labels-generated" ? `Label updated ${age(order.latestLabelEventAt || order.manifestedAt || order.createdAt)} ago` : `${age(order.createdAt)} old`}</span>
                   <span>{order.lines.map((line) => `${line.quantity}x ${line.sku}`).join(", ")}</span>
                 </div>
               </td>

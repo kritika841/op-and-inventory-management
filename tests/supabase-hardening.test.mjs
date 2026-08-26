@@ -125,6 +125,11 @@ test("heavy state is split into protected paginated endpoints without polling re
   assert.match(ui, /const pageSize = offset === 0 \? 25 : 75/);
   assert.match(ui, /const openQueue = \(queue: FulfillmentQueueKey\)/);
   assert.match(ui, /Order ID: ascending/);
+  assert.match(ui, /Latest activity first/);
+  assert.match(ui, /loadMoreFulfillmentOrders\("labels-generated", 0, "activity-desc"\)/);
+  assert.match(ui, /loadMoreFulfillmentOrders\("shipped", 0, "activity-desc"\)/);
+  assert.match(ui, /Label updated/);
+  assert.match(state, /latest_label_event_at/);
   assert.match(ui, /Shipment updated/);
   assert.match(state, /latest_shipment_event_at/);
   assert.match(state, /fulfillmentQueue === "shipped"/);

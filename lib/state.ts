@@ -86,7 +86,12 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
     (SELECT MAX(sh.picked_up_at) FROM shipments sh WHERE sh.order_id=o.id AND sh.is_active=1),
     o.created_at
   )`;
-  let orderQuery = `SELECT o.*,u.name AS assigned_user_name,${shippedActivityExpression} AS latest_shipment_event_at FROM orders o LEFT JOIN users u ON u.id=o.assigned_user_id`;
+  const labelActivityExpression = `COALESCE(
+    (SELECT MAX(COALESCE(sh.label_printed_at,sh.manifested_at)) FROM shipments sh WHERE sh.order_id=o.id AND sh.is_active=1),
+    o.updated_at,
+    o.created_at
+  )`;
+  let orderQuery = `SELECT o.*,u.name AS assigned_user_name,${shippedActivityExpression} AS latest_shipment_event_at,${labelActivityExpression} AS latest_label_event_at FROM orders o LEFT JOIN users u ON u.id=o.assigned_user_id`;
   let orderScope = "SELECT o.id FROM orders o";
   let orderCountQuery = "SELECT COUNT(DISTINCT o.id) AS count FROM orders o";
   const courierActivePredicate = `(o.current_status IN ('PICKED_UP','IN_TRANSIT','OUT_FOR_DELIVERY','DELIVERED','RTO_INITIATED','RTO_IN_TRANSIT','RTO_RECEIVED','RTO_INSPECTION_PENDING','RTO_RESTOCKED','RTO_DAMAGED') OR EXISTS (SELECT 1 FROM shipments fulfillment_shipment WHERE fulfillment_shipment.order_id=o.id AND fulfillment_shipment.is_active=1 AND fulfillment_shipment.picked_up_at IS NOT NULL))`;
@@ -139,7 +144,9 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
       ? "o.created_at DESC, o.id DESC"
       : fulfillmentQueue === "shipped"
         ? `${shippedActivityExpression} DESC, o.id DESC`
-        : "GREATEST(o.created_at,o.updated_at) DESC, o.id DESC";
+        : fulfillmentQueue === "labels-generated"
+          ? `${labelActivityExpression} DESC, o.id DESC`
+          : "GREATEST(o.created_at,o.updated_at) DESC, o.id DESC";
   orderScope += safeOrderLimit > 0 ? ` ORDER BY ${orderSortExpression} LIMIT ${safeOrderLimit} OFFSET ${safeOrderOffset}` : ` ORDER BY ${orderSortExpression}`;
   orderQuery += safeOrderLimit > 0 ? ` ORDER BY ${orderSortExpression} LIMIT ${safeOrderLimit} OFFSET ${safeOrderOffset}` : ` ORDER BY ${orderSortExpression}`;
   
@@ -182,7 +189,7 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
     () => db.prepare(`SELECT r.*,u.name AS requested_by_name FROM order_edit_requests r LEFT JOIN users u ON u.id=r.requested_by WHERE r.order_id IN (${orderScope}) ORDER BY r.created_at DESC`).bind(...params).all<Row>(),
     () => db.prepare("SELECT s.*,u.name AS updated_by_name FROM recall_cooldown_settings s LEFT JOIN users u ON u.id=s.updated_by WHERE s.id='default' LIMIT 1").all<Row>(),
     () => db.prepare("SELECT o.*,ord.order_number,u.name AS overridden_by_name FROM recall_overrides o JOIN orders ord ON ord.id=o.order_id LEFT JOIN users u ON u.id=o.overridden_by ORDER BY o.created_at DESC LIMIT 25").all<Row>(),
-    () => db.prepare(`SELECT order_id,manifested_at,picked_up_at,auto_cancel_deadline,courier_auto_cancel_days,status,is_active FROM shipments WHERE is_active=1 AND order_id IN (${orderScope})`).bind(...params).all<Row>(),
+    () => db.prepare(`SELECT order_id,manifested_at,label_printed_at,picked_up_at,auto_cancel_deadline,courier_auto_cancel_days,status,is_active FROM shipments WHERE is_active=1 AND order_id IN (${orderScope})`).bind(...params).all<Row>(),
   ]);
   const manualCampaignOrderActive = await db.prepare("SELECT 1 AS active FROM audit_events WHERE action='campaign.reordered' LIMIT 1").first<{ active: number }>();
   // Deletion-history checks are needed only when an administrator opens the
@@ -237,6 +244,7 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
       current_status: logisticsProgressed ? logistics.current_status : canonical.current_status,
       updated_at: [canonical.updated_at, logistics.updated_at].filter(Boolean).sort().at(-1) ?? canonical.updated_at,
       latest_shipment_event_at: [canonical.latest_shipment_event_at, logistics.latest_shipment_event_at].filter(Boolean).sort().at(-1) ?? canonical.latest_shipment_event_at,
+      latest_label_event_at: [canonical.latest_label_event_at, logistics.latest_label_event_at].filter(Boolean).sort().at(-1) ?? canonical.latest_label_event_at,
     };
   });
   const orders: OrderView[] = dedupedOrderRows.map((row) => {
@@ -269,6 +277,7 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
       manifestedAt: shipment?.manifested_at ? String(shipment.manifested_at) : null,
       pickedUpAt: shipment?.picked_up_at ? String(shipment.picked_up_at) : null,
       latestShipmentEventAt: row.latest_shipment_event_at ? String(row.latest_shipment_event_at) : null,
+      latestLabelEventAt: row.latest_label_event_at ? String(row.latest_label_event_at) : shipment?.label_printed_at ? String(shipment.label_printed_at) : null,
       autoCancelDeadline: shipment?.auto_cancel_deadline ? String(shipment.auto_cancel_deadline) : null,
       courierAutoCancelDays: shipment?.courier_auto_cancel_days === null || shipment?.courier_auto_cancel_days === undefined ? null : num(shipment.courier_auto_cancel_days),
       awb: row.awb ? String(row.awb) : null, courier: row.courier ? String(row.courier) : null, trackingStatus: row.tracking_status ? String(row.tracking_status) : null,
