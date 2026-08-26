@@ -63,7 +63,7 @@ async function runSnapshotQueries<T>(queries: Array<() => Promise<T>>) {
   return results;
 }
 
-export type FulfillmentQueue = "all" | "new-orders" | "labels-generated" | "shipped" | "confirmed-orders";
+export type FulfillmentQueue = "all" | "new-orders" | "labels-generated" | "shipped" | "confirmed-orders" | "campaign-selection";
 
 export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DASHBOARD_ORDER_LIMIT, orderOffset = 0, fulfillmentQueue: FulfillmentQueue = "all"): Promise<DashboardSnapshot> {
   await ensureDatabase();
@@ -85,7 +85,7 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
   let orderCountQuery = "SELECT COUNT(DISTINCT o.id) AS count FROM orders o";
   const courierActivePredicate = `(o.current_status IN ('PICKED_UP','IN_TRANSIT','OUT_FOR_DELIVERY','DELIVERED','RTO_INITIATED','RTO_IN_TRANSIT','RTO_RECEIVED','RTO_INSPECTION_PENDING','RTO_RESTOCKED','RTO_DAMAGED') OR EXISTS (SELECT 1 FROM shipments fulfillment_shipment WHERE fulfillment_shipment.order_id=o.id AND fulfillment_shipment.is_active=1 AND fulfillment_shipment.picked_up_at IS NOT NULL))`;
   const labelEvidencePredicate = `(COALESCE(o.awb,'')<>'' OR o.current_status IN ('MANIFESTED','LABEL_PRINTED','PICKUP_SCHEDULED','AUTO_CANCEL_RISK'))`;
-  const queuePredicates: Record<Exclude<FulfillmentQueue, "all">, string> = {
+  const queuePredicates: Record<Exclude<FulfillmentQueue, "all" | "campaign-selection">, string> = {
     "new-orders": `o.status<>'cancelled' AND o.confirmation_selected=0 AND NOT ${labelEvidencePredicate} AND NOT ${courierActivePredicate}`,
     "labels-generated": `o.status<>'cancelled' AND ${labelEvidencePredicate} AND NOT ${courierActivePredicate}`,
     shipped: `o.status<>'cancelled' AND ${courierActivePredicate}`,
@@ -119,7 +119,7 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
     fulfillmentCountQuery += " WHERE o.current_status IN ('MANIFESTED','LABEL_PRINTED','PICKUP_SCHEDULED','PICKED_UP','IN_TRANSIT','OUT_FOR_DELIVERY','DELIVERED','AUTO_CANCEL_RISK','SHIPMENT_AUTO_CANCELLED','RTO_INITIATED','RTO_IN_TRANSIT','RTO_RECEIVED','RTO_INSPECTION_PENDING','RTO_RESTOCKED','RTO_DAMAGED')";
   }
 
-  if (fulfillmentQueue !== "all") {
+  if (fulfillmentQueue !== "all" && fulfillmentQueue !== "campaign-selection") {
     const predicate = queuePredicates[fulfillmentQueue];
     const append = (query: string) => `${query}${/\bWHERE\b/i.test(query) ? " AND " : " WHERE "}${predicate}`;
     orderQuery = append(orderQuery);
@@ -127,7 +127,7 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
     orderCountQuery = append(orderCountQuery);
   }
 
-  const orderSortExpression = fulfillmentQueue === "new-orders"
+  const orderSortExpression = fulfillmentQueue === "new-orders" || fulfillmentQueue === "campaign-selection"
     ? "o.created_at DESC, o.id DESC"
     : "GREATEST(o.created_at,o.updated_at) DESC, o.id DESC";
   orderScope += safeOrderLimit > 0 ? ` ORDER BY ${orderSortExpression} LIMIT ${safeOrderLimit} OFFSET ${safeOrderOffset}` : ` ORDER BY ${orderSortExpression}`;
@@ -598,26 +598,33 @@ export async function assignCampaign(actor: AppUser, payload: { campaignId?: str
 export async function assignOrderToLongTermCampaign(orderId: string) {
   await ensureDatabase();
   const db = getEnv().DB;
-  const existing = await db.prepare("SELECT id FROM campaign_assignments WHERE order_id=?1 LIMIT 1").bind(orderId).first<Row>();
-  if (existing) return null;
   const order = await db.prepare("SELECT id,status FROM orders WHERE id=?1").bind(orderId).first<Row>();
   if (!order || ["cancelled", "delivered", "rto_delivered"].includes(String(order.status))) return null;
   const tags = await db.prepare("SELECT tag FROM order_tags WHERE order_id=?1").bind(orderId).all<Row>();
   const orderTags = new Set(tags.results.map((row) => String(row.tag).trim().toLowerCase()).filter(Boolean));
   if (!orderTags.size) return null;
+  const highRtoTags = new Set(["high", "rto_prediction_high"]);
+  const isHighRto = [...orderTags].some((tag) => highRtoTags.has(tag));
+  const existing = await db.prepare("SELECT id,campaign_id FROM campaign_assignments WHERE order_id=?1 LIMIT 1").bind(orderId).first<Row>();
+  // High-RTO routing is a safety rule, not a best-effort long-term filter.
+  // It deliberately replaces a previous assignment so these tagged orders
+  // always enter the confirmation queue owned by the default campaign.
+  if (existing && !isHighRto) return null;
   const campaigns = await db.prepare("SELECT id,assigned_agent_id,criteria_json,position FROM campaigns WHERE is_active=1 ORDER BY position ASC,created_at ASC").all<Row>();
-  const campaign = campaigns.results.find((candidate) => {
+  const campaign = (isHighRto
+    ? campaigns.results.find((candidate) => String(candidate.id) === "cmp_default_high_rto")
+    : campaigns.results.find((candidate) => {
     const criteria = parseCampaignCriteria(candidate.criteria_json);
     return Boolean(criteria?.autoAssignFutureMatching && criteria.tags.length && criteria.tags.every((tag) => orderTags.has(tag.trim().toLowerCase())));
-  });
+  }));
   if (!campaign) return null;
   const agent = await db.prepare("SELECT id FROM users WHERE id=?1 AND role='CONFIRMATION_AGENT' AND active=1").bind(campaign.assigned_agent_id).first<Row>();
   if (!agent) return null;
   const maxPosition = await db.prepare("SELECT COALESCE(MAX(position),-1) AS max_position FROM campaign_assignments WHERE campaign_id=?1").bind(campaign.id).first<{ max_position: number }>();
   const now = new Date().toISOString();
   await db.batch([
-    db.prepare("INSERT INTO campaign_assignments (id,campaign_id,order_id,assigned_agent_id,position,created_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(order_id) DO NOTHING").bind(`cma_${randomHex(8)}`, campaign.id, orderId, campaign.assigned_agent_id, Number(maxPosition?.max_position ?? -1) + 1, now),
-    db.prepare("UPDATE orders SET confirmation_selected=1,confirmation_status='assigned',assigned_user_id=?1,updated_at=?2 WHERE id=?3 AND NOT EXISTS (SELECT 1 FROM campaign_assignments WHERE order_id=?3 AND campaign_id<>?4)").bind(campaign.assigned_agent_id, now, orderId, campaign.id),
+    db.prepare("INSERT INTO campaign_assignments (id,campaign_id,order_id,assigned_agent_id,position,created_at) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(order_id) DO UPDATE SET campaign_id=excluded.campaign_id,assigned_agent_id=excluded.assigned_agent_id,position=excluded.position,created_at=excluded.created_at").bind(`cma_${randomHex(8)}`, campaign.id, orderId, campaign.assigned_agent_id, Number(maxPosition?.max_position ?? -1) + 1, now),
+    db.prepare("UPDATE orders SET confirmation_selected=1,confirmation_status='assigned',assigned_user_id=?1,current_status=CASE WHEN current_status IN ('APPROVED','INGESTED') THEN 'PENDING_CONFIRMATION' ELSE current_status END,updated_at=?2 WHERE id=?3").bind(campaign.assigned_agent_id, now, orderId),
   ]);
   await audit(null, "campaign.auto-assigned", "campaign", String(campaign.id), `Order ${orderId} matched long-term tags: ${[...orderTags].join(", ")}`);
   await broadcastOrderUpdate(orderId, "campaign.auto-assigned");
@@ -823,6 +830,7 @@ export async function markIntegrationSync(actor: AppUser) {
   try {
     const shopify = await syncShopifyOrders();
     const backfill = await backfillInvalidSkuOrderLines();
+    for (const orderId of shopify.orderIds) await assignOrderToLongTermCampaign(orderId);
     for (const orderId of shopify.orderIds) changedOrderIds.add(orderId);
     for (const orderId of backfill.orderIds) changedOrderIds.add(orderId);
     await db.prepare("UPDATE integration_state SET status='connected',detail=?1,last_synced_at=?2,updated_at=?2 WHERE provider='shopify'").bind(`${shopify.orders} Shopify orders reconciled · ${shopify.mode} sync · ${backfill.updated} order lines backfilled`, now).run();

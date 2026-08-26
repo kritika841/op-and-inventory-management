@@ -7,6 +7,7 @@ import { OrderEventsHub } from "./order-events";
 import { getPostgresDatabase, type AppDatabase } from "../lib/postgres";
 import { audit, ensureDatabase, getEnv } from "../lib/database";
 import { backfillInvalidSkuOrderLines, reconcileRecentShiprocketOrders, syncShiprocketOpenOrders, syncShopifyOrders } from "../lib/integrations";
+import { assignOrderToLongTermCampaign } from "../lib/state";
 
 interface Env {
   ASSETS: Fetcher;
@@ -67,6 +68,7 @@ async function processScheduledIntegrationSync() {
     await db.prepare("UPDATE integration_state SET status='syncing',detail='Scheduled Shopify order sync in progress',updated_at=?1 WHERE provider='shopify'").bind(now).run();
     const shopify = await syncShopifyOrders();
     const backfill = await backfillInvalidSkuOrderLines();
+    for (const orderId of shopify.orderIds) await assignOrderToLongTermCampaign(orderId);
     shopify.orderIds.forEach((id) => changedOrderIds.add(id));
     backfill.orderIds.forEach((id) => changedOrderIds.add(id));
     await db.prepare("UPDATE integration_state SET status='connected',detail=?1,last_synced_at=?2,updated_at=?2 WHERE provider='shopify'").bind(`${shopify.orders} orders reconciled · ${shopify.mode} scheduled sync`, now).run();

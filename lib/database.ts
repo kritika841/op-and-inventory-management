@@ -176,31 +176,32 @@ async function seedReferenceData(db: AppDatabase) {
 }
 
 /**
- * Creates the one default, durable campaign for Shopify's "High RTO" tag.
+ * Creates the one default, durable campaign for the exact high-RTO tags.
  * It is inserted only once, at the top of the board. Later drag-and-drop
  * ordering is never changed, so managers retain complete control of priority.
  */
 export async function ensureDefaultHighRtoCampaign(db = getEnv().DB) {
-  const campaigns = await db.prepare("SELECT id,criteria_json FROM campaigns WHERE is_active=1").all<{ id: string; criteria_json: string | null }>();
-  const exists = campaigns.results.some((campaign) => {
-    try {
-      const criteria = JSON.parse(campaign.criteria_json || "{}") as { autoAssignFutureMatching?: boolean; tags?: unknown };
-      const tags = Array.isArray(criteria.tags) ? criteria.tags.map((tag) => String(tag).trim().toLowerCase()) : [];
-      return criteria.autoAssignFutureMatching && tags.includes("high rto");
-    } catch { return false; }
-  });
-  if (exists) return;
-
   const agent = await db.prepare("SELECT id FROM users WHERE role='CONFIRMATION_AGENT' AND active=1 ORDER BY created_at ASC LIMIT 1").first<{ id: string }>();
   const creator = await db.prepare("SELECT id FROM users WHERE role IN ('ADMIN','MANAGER') AND active=1 ORDER BY CASE role WHEN 'ADMIN' THEN 0 ELSE 1 END,created_at ASC LIMIT 1").first<{ id: string }>();
   if (!agent || !creator) return;
 
   const now = new Date().toISOString();
+  const highRtoCriteria = JSON.stringify({ duplicateOnly: false, duplicateMode: "NONE", tags: ["high", "rto_prediction_high"], orderNumbers: [], productNames: [], paymentMethod: "ANY", previousUnfulfilledOnly: false, includeRtoRisk: true, autoAssignFutureMatching: true });
+  // Keep the fixed campaign identity and a user's drag position, but migrate
+  // earlier installations from the old display-only "High RTO" tag to the
+  // two exact Shopify routing tags.
+  const current = await db.prepare("SELECT id,assigned_agent_id FROM campaigns WHERE id='cmp_default_high_rto' LIMIT 1").first<{ id: string; assigned_agent_id: string }>();
+  if (current) {
+    const assignedAgent = await db.prepare("SELECT id FROM users WHERE id=?1 AND role='CONFIRMATION_AGENT' AND active=1").bind(current.assigned_agent_id).first<{ id: string }>();
+    await db.prepare("UPDATE campaigns SET criteria_json=?1,description=?2,assigned_agent_id=?3 WHERE id='cmp_default_high_rto'")
+      .bind(highRtoCriteria, "Automatically assigns orders tagged high or rto_prediction_high for confirmation.", assignedAgent?.id ?? agent.id).run();
+    return;
+  }
   const active = await db.prepare("SELECT id,position FROM campaigns WHERE is_active=1 ORDER BY position ASC").all<{ id: string; position: number }>();
   // A fixed id plus RETURNING makes this safe when two cold requests race.
   // Only the request that actually inserts the campaign may shift the board.
   const inserted = await db.prepare("INSERT INTO campaigns (id,name,description,urgency,assigned_agent_id,criteria_json,position,created_by,created_at,is_active) VALUES ('cmp_default_high_rto',?1,?2,'MEDIUM',?3,?4,0,?5,?6,1) ON CONFLICT(id) DO NOTHING RETURNING id")
-    .bind("High RTO review", "Automatically assigns future Shopify orders tagged High RTO.", agent.id, JSON.stringify({ duplicateOnly: false, duplicateMode: "NONE", tags: ["High RTO"], orderNumbers: [], productNames: [], paymentMethod: "ANY", previousUnfulfilledOnly: false, includeRtoRisk: true, autoAssignFutureMatching: true }), creator.id, now)
+    .bind("High RTO review", "Automatically assigns orders tagged high or rto_prediction_high for confirmation.", agent.id, highRtoCriteria, creator.id, now)
     .first<{ id: string }>();
   if (!inserted) return;
   if (active.results.length) {

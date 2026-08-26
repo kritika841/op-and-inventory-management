@@ -23,6 +23,23 @@ test("default High RTO campaign satisfies required ownership and is race safe", 
   assert.match(database, /ON CONFLICT\(id\) DO NOTHING RETURNING id/);
   assert.doesNotMatch(database, /position,created_by,created_at,is_active\) VALUES \([^\n]*NULL/);
   assert.match(database, /core workspace must remain available/);
+  assert.match(database, /rto_prediction_high/);
+  assert.match(database, /tags: \["high", "rto_prediction_high"\]/);
+});
+
+test("high-RTO Shopify tags always route to confirmation and campaign selection pages newest first", async () => {
+  const [state, shopifyWebhook, ui, stateRoute] = await Promise.all([
+    source("lib/state.ts"), source("app/api/webhooks/shopify/route.ts"),
+    source("app/OperationsApp.tsx"), source("app/api/state/route.ts"),
+  ]);
+  assert.match(state, /new Set\(\["high", "rto_prediction_high"\]\)/);
+  assert.match(state, /String\(candidate\.id\) === "cmp_default_high_rto"/);
+  assert.match(state, /confirmation_selected=1,confirmation_status='assigned'/);
+  assert.match(shopifyWebhook, /await assignOrderToLongTermCampaign\(orderId\)/);
+  assert.match(ui, /queue=campaign-selection/);
+  assert.match(ui, /validDate\(right\.createdAt\).*validDate\(left\.createdAt\)/);
+  assert.match(ui, /campaignSourcePage\.hasMore/);
+  assert.match(stateRoute, /campaign-selection/);
 });
 
 test("migration enforces canonical order identity and the dry run reconciles every duplicate", async () => {

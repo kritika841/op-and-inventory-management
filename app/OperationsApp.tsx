@@ -569,7 +569,10 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
   const [campaignSelectedOrderIds, setCampaignSelectedOrderIds] = useState<string[]>([]);
   const [campaignSearch, setCampaignSearch] = useState("");
   const deferredCampaignSearch = useDeferredValue(campaignSearch);
-  const [campaignVisibleCount, setCampaignVisibleCount] = useState(120);
+  const [campaignSourceOrders, setCampaignSourceOrders] = useState<OrderView[]>([]);
+  const [campaignSourcePage, setCampaignSourcePage] = useState({ nextOffset: 0, total: 0, hasMore: true });
+  const [campaignSourceLoading, setCampaignSourceLoading] = useState(false);
+  const [campaignSourceError, setCampaignSourceError] = useState("");
   const [campaignSyncing, setCampaignSyncing] = useState(false);
   const [campaignFilters, setCampaignFilters] = useState<CampaignCriteria>({ duplicateOnly: false, duplicateMode: "NONE", tags: [], orderNumbers: [], productNames: [], paymentMethod: "ANY", previousUnfulfilledOnly: false, includeRtoRisk: true, autoAssignFutureMatching: false });
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
@@ -590,7 +593,7 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
     useSensor(PointerSensor, { activationConstraint: { distance: 8 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const modalOrders = data.orders;
+  const modalOrders = campaignModalOpen ? campaignSourceOrders : data.orders;
   const campaignOrders = modalOrders.filter((order) => order.assignedCampaign);
   const campaignOrdersByCampaign = new Map<string, OrderView[]>();
   for (const order of campaignOrders) {
@@ -657,8 +660,8 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
     if (modalCriteria.previousUnfulfilledOnly && !priorUnfulfilledEligibleOrderIds.has(order.id)) return false;
     if (!modalCriteria.includeRtoRisk && order.rtoRisk === "HIGH") return false;
     return true;
-  }).filter((order) => !deferredCampaignSearch.trim() || `${order.orderNumber} ${order.customerName}`.toLowerCase().includes(deferredCampaignSearch.trim().toLowerCase())).sort((left, right) => new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime()) : [];
-  const renderedAssignableOrders = filteredAssignableOrders.slice(0, campaignVisibleCount);
+  }).filter((order) => !deferredCampaignSearch.trim() || `${order.orderNumber} ${order.customerName}`.toLowerCase().includes(deferredCampaignSearch.trim().toLowerCase())).sort((left, right) => (validDate(right.createdAt)?.getTime() ?? 0) - (validDate(left.createdAt)?.getTime() ?? 0)) : [];
+  const renderedAssignableOrders = filteredAssignableOrders;
   const filteredAssignableOrderIds = new Set(filteredAssignableOrders.map((order) => order.id));
   const visibleSelectedCampaignOrderIds = campaignSelectedOrderIds.filter((orderId) => filteredAssignableOrderIds.has(orderId));
   const queue = orders
@@ -755,15 +758,45 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
     closeQuickAction();
   }
 
+  async function loadCampaignOrders(offset: number, replace = false) {
+    if (campaignSourceLoading) return;
+    setCampaignSourceLoading(true);
+    setCampaignSourceError("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 20_000);
+    try {
+      const response = await fetch(`/api/state?scope=orders&queue=campaign-selection&limit=120&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+      if (response.status === 401) { window.location.href = "/login"; return; }
+      if (!response.ok) throw new Error("Could not load campaign orders");
+      const snapshot = await response.json() as DashboardSnapshot;
+      setCampaignSourceOrders((current) => {
+        if (replace) return snapshot.orders;
+        const incoming = new Map(snapshot.orders.map((order) => [order.id, order]));
+        const merged = current.map((order) => incoming.get(order.id) ?? order);
+        const known = new Set(current.map((order) => order.id));
+        return [...merged, ...snapshot.orders.filter((order) => !known.has(order.id))];
+      });
+      setCampaignSourcePage({ nextOffset: snapshot.orderPagination.nextOffset, total: snapshot.orderPagination.total, hasMore: snapshot.orderPagination.hasMore });
+    } catch {
+      setCampaignSourceError("Older orders could not be loaded. Please try again.");
+    } finally {
+      window.clearTimeout(timeout);
+      setCampaignSourceLoading(false);
+    }
+  }
+
   function openCampaignModal() {
     setCampaignModalOpen(true);
     setCampaignName("");
     setCampaignAgentId(confirmationAgents[0]?.id ?? "");
     setCampaignOrderNumbers("");
     setCampaignSearch("");
-    setCampaignVisibleCount(120);
+    setCampaignSourceOrders([]);
+    setCampaignSourcePage({ nextOffset: 0, total: 0, hasMore: true });
+    setCampaignSourceError("");
     setCampaignFilters({ duplicateOnly: false, duplicateMode: "NONE", tags: [], orderNumbers: [], productNames: [], paymentMethod: "ANY", previousUnfulfilledOnly: false, includeRtoRisk: true, autoAssignFutureMatching: false });
     setCampaignSelectedOrderIds([]);
+    void loadCampaignOrders(0, true);
   }
 
   function closeCampaignModal() {
@@ -916,7 +949,7 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
               <Search size={21} strokeWidth={1.8} aria-hidden="true" />
               <input aria-label="Search orders" value={campaignSearch} onChange={(event) => setCampaignSearch(event.target.value)} placeholder="Search by order number or customer name" />
             </label>
-            <div className="create-campaign-table-wrap" onScroll={(event) => { const target = event.currentTarget; if (target.scrollHeight - target.scrollTop - target.clientHeight < 180) setCampaignVisibleCount((current) => Math.min(current + 120, filteredAssignableOrders.length)); }}>
+            <div className="create-campaign-table-wrap" onScroll={(event) => { const target = event.currentTarget; if (target.scrollHeight - target.scrollTop - target.clientHeight < 180 && campaignSourcePage.hasMore && !campaignSourceLoading) void loadCampaignOrders(campaignSourcePage.nextOffset); }}>
               <table className="create-campaign-table">
                 <thead>
                   <tr>
@@ -943,7 +976,7 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
                   ))}
                 </tbody>
               </table>
-              {!filteredAssignableOrders.length && (
+              {!campaignSourceLoading && !filteredAssignableOrders.length && (
                 <div className="create-campaign-empty">
                   <strong>No orders match these filters</strong>
                   <span>Adjust the campaign filters above to populate the selection list.</span>
@@ -951,7 +984,9 @@ function Confirmation({ data, orders, users, campaigns, currentUser, onAction, o
               )}
             </div>
             <div className="create-campaign-table-footer">
-              <span>{filteredAssignableOrders.length} matching orders · {renderedAssignableOrders.length} loaded</span>
+              <span>{campaignSourceLoading ? "Loading orders…" : `${filteredAssignableOrders.length} matching orders · ${campaignSourceOrders.length} of ${campaignSourcePage.total} loaded`}</span>
+              {campaignSourcePage.hasMore && !campaignSourceLoading && <button className="small-button" type="button" onClick={() => void loadCampaignOrders(campaignSourcePage.nextOffset)}>Load older orders</button>}
+              {campaignSourceError && <><span role="alert">{campaignSourceError}</span><button className="small-button" type="button" onClick={() => void loadCampaignOrders(campaignSourcePage.nextOffset)}>Retry</button></>}
             </div>
           </section>
           <section className="create-campaign-submit-bar">

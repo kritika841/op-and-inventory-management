@@ -76,7 +76,9 @@ export async function POST(request: Request) {
       // reallocates components. Keep the webhook path single-pass so Shopify
       // receives its acknowledgement promptly.
       if (orderId) {
-        if (topic === "orders/create") await assignOrderToLongTermCampaign(orderId);
+        // Re-evaluate on tag updates as well as creates. Shopify frequently
+        // applies risk tags after the initial order-create webhook.
+        await assignOrderToLongTermCampaign(orderId);
         await broadcastOrderUpdate(orderId, `shopify.${topic.replace("/", ".")}`);
         await recordWebhookDiagnostic("webhook.shopify.processed", `${topic} processed for order ${orderId}`);
       }

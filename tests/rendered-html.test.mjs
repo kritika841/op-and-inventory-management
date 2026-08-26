@@ -18,7 +18,8 @@ test("ships Satmi inventory metadata and removes starter preview", async () => {
 
 test("uses Supabase for relational data and retains only label object storage", async () => {
   const hosting = JSON.parse(await readFile(new URL(".openai/hosting.json", root), "utf8"));
-  assert.deepEqual(hosting, { r2: "LABELS" });
+  assert.equal(hosting.r2, "LABELS");
+  assert.deepEqual(Object.keys(hosting).filter((key) => key !== "project_id"), ["r2"]);
 });
 
 test("includes manual sales and inventory movement logging", async () => {
