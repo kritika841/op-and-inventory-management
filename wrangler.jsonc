@@ -1,0 +1,63 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "satmi-operations",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-05-22",
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "LABELS",
+      "bucket_name": "site-creator-r2"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ORDER_EVENTS",
+        "class_name": "OrderEventsHub"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "order-events-v1",
+      "new_sqlite_classes": ["OrderEventsHub"]
+    }
+  ],
+  "env": {
+    "staging": {
+      "r2_buckets": [
+        {
+          "binding": "LABELS",
+          "bucket_name": "site-creator-staging-r2"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "ORDER_EVENTS",
+            "class_name": "OrderEventsHub"
+          }
+        ]
+      }
+    },
+    "production": {
+      "r2_buckets": [
+        {
+          "binding": "LABELS",
+          "bucket_name": "site-creator-production-r2"
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "ORDER_EVENTS",
+            "class_name": "OrderEventsHub"
+          }
+        ]
+      }
+    }
+  }
+}

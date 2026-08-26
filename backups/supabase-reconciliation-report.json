@@ -1,0 +1,9 @@
+{
+  "generatedAt": "2026-08-25T03:05:19.352Z",
+  "source": "backups/d1-pre-supabase-20260814.sqlite",
+  "sourceOrderRows": 4416,
+  "canonicalOrders": 3200,
+  "duplicatesRemoved": 1216,
+  "duplicateGroupsRedacted": true,
+  "note": "Order numbers and provider identifiers are intentionally excluded from source control. The local reconciliation backup remains ignored."
+}

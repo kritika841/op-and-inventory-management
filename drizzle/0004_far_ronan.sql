@@ -1,0 +1,1 @@
+CREATE INDEX `manual_sale_components_sale_idx` ON `manual_sale_components` (`sale_id`);

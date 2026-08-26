@@ -1,0 +1,53 @@
+{
+  "name": "satmi-operations",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "dev": "SATMI_NODE_DEV=1 WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext dev --hostname 127.0.0.1 --port 8000",
+    "build": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext build",
+    "start": "WRANGLER_LOG_PATH=.wrangler/wrangler.log vinext start",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "test:browser": "playwright test",
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "npx supabase migration new",
+    "db:migrate:staging": "npx supabase migration up --linked",
+    "db:migrate:production": "npx supabase migration up --linked",
+    "db:migrate:supabase": "node scripts/migrate-d1-to-supabase.mjs --apply-schema",
+    "db:reconcile:dry-run": "node scripts/migrate-d1-to-supabase.mjs --dry-run",
+    "sync:backfill": "node scripts/trigger-sync.mjs",
+    "tunnel": "ngrok http --domain=unrelated-snagged-unframed.ngrok-free.dev 8000"
+  },
+  "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
+    "lucide-react": "^1.31.0",
+    "next": "^16.3.1",
+    "postgres": "^3.4.9",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.52.1",
+    "@playwright/test": "^1.62.1",
+    "@tailwindcss/postcss": "4.2.1",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
+    "eslint": "9.39.4",
+    "eslint-config-next": "16.2.6",
+    "react-server-dom-webpack": "^19.2.8",
+    "tailwindcss": "4.2.1",
+    "typescript": "5.9.3",
+    "vinext": "0.0.50",
+    "vite": "^8.2.1",
+    "wrangler": "^4.123.0"
+  },
+  "type": "module"
+}
