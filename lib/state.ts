@@ -64,8 +64,9 @@ async function runSnapshotQueries<T>(queries: Array<() => Promise<T>>) {
 }
 
 export type FulfillmentQueue = "all" | "new-orders" | "labels-generated" | "shipped" | "confirmed-orders" | "campaign-selection";
+export type FulfillmentSort = "activity-desc" | "order-asc";
 
-export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DASHBOARD_ORDER_LIMIT, orderOffset = 0, fulfillmentQueue: FulfillmentQueue = "all"): Promise<DashboardSnapshot> {
+export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DASHBOARD_ORDER_LIMIT, orderOffset = 0, fulfillmentQueue: FulfillmentQueue = "all", fulfillmentSort: FulfillmentSort = "activity-desc"): Promise<DashboardSnapshot> {
   await ensureDatabase();
   // A live workspace may gain its first confirmation agent after boot. Recheck
   // the idempotent default rule here so High RTO becomes available immediately.
@@ -132,11 +133,13 @@ export async function getSnapshot(currentUser: AppUser, orderLimit = DEFAULT_DAS
     orderCountQuery = append(orderCountQuery);
   }
 
-  const orderSortExpression = fulfillmentQueue === "new-orders" || fulfillmentQueue === "campaign-selection"
-    ? "o.created_at DESC, o.id DESC"
-    : fulfillmentQueue === "shipped"
-      ? `${shippedActivityExpression} DESC, o.id DESC`
-      : "GREATEST(o.created_at,o.updated_at) DESC, o.id DESC";
+  const orderSortExpression = fulfillmentSort === "order-asc" && fulfillmentQueue !== "campaign-selection"
+    ? "CASE WHEN o.normalized_order_number LIKE 'SI%' THEN 0 ELSE 1 END ASC, o.normalized_order_number ASC, o.id ASC"
+    : fulfillmentQueue === "new-orders" || fulfillmentQueue === "campaign-selection"
+      ? "o.created_at DESC, o.id DESC"
+      : fulfillmentQueue === "shipped"
+        ? `${shippedActivityExpression} DESC, o.id DESC`
+        : "GREATEST(o.created_at,o.updated_at) DESC, o.id DESC";
   orderScope += safeOrderLimit > 0 ? ` ORDER BY ${orderSortExpression} LIMIT ${safeOrderLimit} OFFSET ${safeOrderOffset}` : ` ORDER BY ${orderSortExpression}`;
   orderQuery += safeOrderLimit > 0 ? ` ORDER BY ${orderSortExpression} LIMIT ${safeOrderLimit} OFFSET ${safeOrderOffset}` : ` ORDER BY ${orderSortExpression}`;
   

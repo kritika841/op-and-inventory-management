@@ -2019,6 +2019,9 @@ html[data-theme="dark"] .segmented button.active{background:#253246;color:#fff;b
 .fulfillment-workbench .panel-heading>div:first-child{min-width:220px}
 .fulfillment-workbench .panel-heading .row-actions{flex:1;align-items:center;justify-content:flex-end}
 .fulfillment-workbench .fulfillment-inline-search{min-width:260px;max-width:480px;flex:1}
+.fulfillment-sort-control{display:inline-flex;min-width:180px}
+.fulfillment-sort-control select{width:100%;min-height:42px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink);padding:0 34px 0 12px;font:inherit;font-weight:700;cursor:pointer}
+.fulfillment-sort-control select:disabled{opacity:.55;cursor:wait}
 .fulfillment-bulk-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap}
 .fulfillment-bulk-button:disabled{opacity:.45;cursor:not-allowed}
 .fulfillment-action-popover-wrap{position:relative;display:inline-flex}

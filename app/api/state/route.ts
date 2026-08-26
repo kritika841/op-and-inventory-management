@@ -1,5 +1,5 @@
 import { authorizeRequest } from "@/lib/auth";
-import { getSnapshot, type FulfillmentQueue } from "@/lib/state";
+import { getSnapshot, type FulfillmentQueue, type FulfillmentSort } from "@/lib/state";
 
 export async function GET(request: Request) {
   const auth = await authorizeRequest(request);
@@ -9,8 +9,10 @@ export async function GET(request: Request) {
   const rawLimit = Number(search.get("limit") || 75);
   const rawOffset = Number(search.get("offset") || 0);
   const rawQueue = search.get("queue") || "all";
+  const rawSort = search.get("sort") || "activity-desc";
   const queue = (["all", "new-orders", "labels-generated", "shipped", "confirmed-orders", "campaign-selection"].includes(rawQueue) ? rawQueue : "all") as FulfillmentQueue;
+  const sort = (["activity-desc", "order-asc"].includes(rawSort) ? rawSort : "activity-desc") as FulfillmentSort;
   const limit = scope === "all" ? 0 : Number.isFinite(rawLimit) ? Math.max(1, Math.min(200, Math.floor(rawLimit))) : 75;
   const offset = Number.isFinite(rawOffset) ? Math.max(0, Math.floor(rawOffset)) : 0;
-  return Response.json(await getSnapshot(auth.user, limit, offset, queue), { headers: { "cache-control": "no-store" } });
+  return Response.json(await getSnapshot(auth.user, limit, offset, queue, sort), { headers: { "cache-control": "no-store" } });
 }

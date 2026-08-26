@@ -13,6 +13,7 @@ import { useOrderEvents } from "./useOrderEvents";
 type ViewKey = "overview" | "orders" | "confirmation" | "fulfillment" | "inventory" | "setup" | "rto" | "team";
 type InventorySection = "summary" | "components" | "stock" | "recipes" | "packaging";
 type FulfillmentQueueKey = "new-orders" | "labels-generated" | "shipped" | "confirmed-orders" | "all";
+type FulfillmentSortKey = "order-asc" | "activity-desc";
 type FulfillmentQueuePage = { nextOffset: number; hasMore: boolean };
 
 const navItems: Array<{ key: ViewKey; Icon: LucideIcon; label: string }> = [
@@ -227,7 +228,7 @@ export default function OperationsApp() {
   }, [theme]);
   useOrderEvents(() => load(view === "fulfillment").catch(() => undefined));
 
-  const loadMoreFulfillmentOrders = useCallback(async (queue: FulfillmentQueueKey, offset: number): Promise<FulfillmentQueuePage | null> => {
+  const loadMoreFulfillmentOrders = useCallback(async (queue: FulfillmentQueueKey, offset: number, sort: FulfillmentSortKey): Promise<FulfillmentQueuePage | null> => {
     if (fulfillmentInFlightRef.current.has(queue)) return null;
     fulfillmentInFlightRef.current.add(queue);
     setFulfillmentLoadError("");
@@ -235,7 +236,7 @@ export default function OperationsApp() {
     const timeout = window.setTimeout(() => controller.abort(), 45_000);
     try {
       const pageSize = offset === 0 ? 25 : 75;
-      const response = await fetch(`/api/state?scope=orders&queue=${encodeURIComponent(queue)}&limit=${pageSize}&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+      const response = await fetch(`/api/state?scope=orders&queue=${encodeURIComponent(queue)}&sort=${encodeURIComponent(sort)}&limit=${pageSize}&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
       if (response.status === 401) { window.location.href = "/login"; return null; }
       if (!response.ok) throw new Error("Could not load the next fulfillment page");
       const snapshot = await response.json() as DashboardSnapshot;
@@ -1214,7 +1215,7 @@ function confirmationPhone(order: OrderView, orders: OrderView[]) {
   return matchingOrder?.customerPhone || "Phone unavailable in synced data";
 }
 
-function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIntegrationSync, loadMoreError, onLoadMore: loadQueuePage }: { data: DashboardSnapshot; orders: OrderView[]; role: DashboardSnapshot["currentUser"]["role"]; onAction: (id: string, action: string, payload?: Record<string, unknown>, success?: string) => Promise<void>; onUpload: (id: string, file: File) => Promise<void>; onPackaging: (id: string, lines: Array<{ componentId: string; quantity: number }>) => Promise<void>; onIntegrationSync: (success?: string) => Promise<void>; loadMoreError: string; onLoadMore: (queue: FulfillmentQueueKey, offset: number) => Promise<FulfillmentQueuePage | null> }) {
+function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIntegrationSync, loadMoreError, onLoadMore: loadQueuePage }: { data: DashboardSnapshot; orders: OrderView[]; role: DashboardSnapshot["currentUser"]["role"]; onAction: (id: string, action: string, payload?: Record<string, unknown>, success?: string) => Promise<void>; onUpload: (id: string, file: File) => Promise<void>; onPackaging: (id: string, lines: Array<{ componentId: string; quantity: number }>) => Promise<void>; onIntegrationSync: (success?: string) => Promise<void>; loadMoreError: string; onLoadMore: (queue: FulfillmentQueueKey, offset: number, sort: FulfillmentSortKey) => Promise<FulfillmentQueuePage | null> }) {
   const canOperate = ["ADMIN", "MANAGER", "OPERATIONS"].includes(role);
   const canHandoff = ["ADMIN", "MANAGER", "WAREHOUSE"].includes(role);
   const boxes = data.inventory.filter((item) => item.componentType === "COURIER_BOX");
@@ -1229,6 +1230,7 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
     all: { initialized: false, nextOffset: 0, hasMore: true },
   });
   const [queueLoading, setQueueLoading] = useState<Record<FulfillmentQueueKey, boolean>>({ "new-orders": false, "labels-generated": false, shipped: false, "confirmed-orders": false, all: false });
+  const [fulfillmentSort, setFulfillmentSort] = useState<FulfillmentSortKey>("order-asc");
   const [selected, setSelected] = useState<string[]>([]);
   const [manifesting, setManifesting] = useState(false);
   const [queueSearch, setQueueSearch] = useState("");
@@ -1249,13 +1251,13 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
     if (queueLoading[queue] || (current.initialized && !current.hasMore)) return;
     setQueueLoading((loading) => ({ ...loading, [queue]: true }));
     try {
-      const page = await loadQueuePage(queue, current.initialized ? current.nextOffset : 0);
+      const page = await loadQueuePage(queue, current.initialized ? current.nextOffset : 0, fulfillmentSort);
       if (!page) return;
       setQueuePages((pages) => ({ ...pages, [queue]: { initialized: true, nextOffset: page.nextOffset, hasMore: page.hasMore } }));
     } finally {
       setQueueLoading((loading) => ({ ...loading, [queue]: false }));
     }
-  }, [activeQueue, loadQueuePage, queueLoading, queuePages]);
+  }, [activeQueue, fulfillmentSort, loadQueuePage, queueLoading, queuePages]);
   useEffect(() => {
     if (!bulkStatus) return;
     const timer = window.setTimeout(() => setBulkStatus(null), 5_000);
@@ -1281,18 +1283,24 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
   const hasCourierPickup = (order: OrderView) => fulfillmentShipmentBucket(order) === "shipped";
   const hasGeneratedLabel = (order: OrderView) => fulfillmentShipmentBucket(order) === "labels-generated";
   const canManifestOrder = (order: OrderView) => !isCancelledOrder(order) && confirmationCleared(order) && !hasGeneratedLabel(order) && !hasCourierPickup(order);
-  const newestFirst = (rows: OrderView[], queue: FulfillmentQueueKey) => [...rows].sort((left, right) => fulfillmentActivityMs(right, queue) - fulfillmentActivityMs(left, queue));
-  const newOrders = newestFirst(orders.filter((order) => !isCancelledOrder(order) && !order.confirmationSelected && fulfillmentShipmentBucket(order) === "new-orders"), "new-orders");
-  const labelsGenerated = newestFirst(orders.filter((order) => !isCancelledOrder(order) && !hasCourierPickup(order) && hasGeneratedLabel(order)), "labels-generated");
-  const shipped = newestFirst(orders.filter((order) => !isCancelledOrder(order) && hasCourierPickup(order)), "shipped");
-  const confirmedOrders = newestFirst(orders.filter((order) => !isCancelledOrder(order) && order.confirmationStatus === "confirmed" && !hasGeneratedLabel(order) && !hasCourierPickup(order)), "confirmed-orders");
+  const sortFulfillmentOrders = (rows: OrderView[], queue: FulfillmentQueueKey) => [...rows].sort((left, right) => {
+    if (fulfillmentSort !== "order-asc") return fulfillmentActivityMs(right, queue) - fulfillmentActivityMs(left, queue) || right.id.localeCompare(left.id);
+    const leftNumber = left.orderNumber.replace(/^#/, "");
+    const rightNumber = right.orderNumber.replace(/^#/, "");
+    const prefixDelta = Number(!leftNumber.startsWith("SI")) - Number(!rightNumber.startsWith("SI"));
+    return prefixDelta || leftNumber.localeCompare(rightNumber, undefined, { numeric: true, sensitivity: "base" }) || left.id.localeCompare(right.id);
+  });
+  const newOrders = sortFulfillmentOrders(orders.filter((order) => !isCancelledOrder(order) && !order.confirmationSelected && fulfillmentShipmentBucket(order) === "new-orders"), "new-orders");
+  const labelsGenerated = sortFulfillmentOrders(orders.filter((order) => !isCancelledOrder(order) && !hasCourierPickup(order) && hasGeneratedLabel(order)), "labels-generated");
+  const shipped = sortFulfillmentOrders(orders.filter((order) => !isCancelledOrder(order) && hasCourierPickup(order)), "shipped");
+  const confirmedOrders = sortFulfillmentOrders(orders.filter((order) => !isCancelledOrder(order) && order.confirmationStatus === "confirmed" && !hasGeneratedLabel(order) && !hasCourierPickup(order)), "confirmed-orders");
   const bulkManifestEnabled = canOperate && (activeQueue === "new-orders" || activeQueue === "confirmed-orders");
   const queueMap = {
     "new-orders": newOrders,
     "labels-generated": labelsGenerated,
     shipped,
     "confirmed-orders": confirmedOrders,
-    all: newestFirst(orders, "all"),
+    all: sortFulfillmentOrders(orders, "all"),
   } as const;
   const queueMeta = {
     "new-orders": {
@@ -1448,6 +1456,12 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
             <div className="fulfillment-inline-search">
               <input value={queueSearch} onChange={(event) => setQueueSearch(event.target.value)} placeholder="Search order, customer, phone, AWB, SKU, or RTO tag" />
             </div>
+            <label className="fulfillment-sort-control"><select aria-label="Order sort" disabled={Object.values(queueLoading).some(Boolean)} value={fulfillmentSort} onChange={(event) => {
+              const nextSort = event.target.value as FulfillmentSortKey;
+              setFulfillmentSort(nextSort);
+              setQueuePages({ "new-orders": { initialized: false, nextOffset: 0, hasMore: true }, "labels-generated": { initialized: false, nextOffset: 0, hasMore: true }, shipped: { initialized: false, nextOffset: 0, hasMore: true }, "confirmed-orders": { initialized: false, nextOffset: 0, hasMore: true }, all: { initialized: false, nextOffset: 0, hasMore: true } });
+              setSelected([]);
+            }}><option value="order-asc">Order ID: ascending</option><option value="activity-desc">Latest activity first</option></select></label>
             <div className="fulfillment-action-popover-wrap"><button className="small-button fulfillment-bulk-button" disabled={!bulkOrders.length} onClick={() => void copyOrderNumbers()}><Clipboard size={15} /> Copy IDs</button>{bulkStatus?.kind === "copy" && <span className="fulfillment-action-popover" role="status">{bulkStatus.message}</span>}</div>
             <div className="fulfillment-action-popover-wrap"><button className="small-button fulfillment-bulk-button" disabled={!bulkOrders.length} onClick={exportShipmentSheet}><Download size={15} /> Export sheet</button>{bulkStatus?.kind === "export" && <span className="fulfillment-action-popover" role="status">{bulkStatus.message}</span>}</div>
             
