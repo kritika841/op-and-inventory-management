@@ -14,16 +14,21 @@ export async function POST(request: Request) {
   const runtime = getEnv();
   const configuredSecret = runtime.SHIPROCKET_WEBHOOK_SECRET?.trim();
   const authorization = request.headers.get("authorization") ?? "";
-  const suppliedSecret = (request.headers.get("x-api-key") ?? authorization.replace(/^Bearer\s+/i, "")).trim();
-  // Shiprocket documents the optional webhook security token as x-api-key.
-  // Accepting a Bearer envelope as well supports a reverse proxy without
-  // weakening authentication.
+  // Shiprocket lets an account choose the webhook header key. Authenticate by
+  // possession of the exact configured value regardless of that key, while
+  // retaining explicit support for x-api-key and Bearer installations.
+  const credentialCandidates = [
+    request.headers.get("x-api-key") ?? "",
+    authorization.replace(/^Bearer\s+/i, ""),
+    ...[...request.headers.entries()].map(([, value]) => value),
+  ].map((value) => value.trim()).filter(Boolean);
   if (!configuredSecret) {
     await recordWebhookDiagnostic("webhook.shiprocket.rejected", "SHIPROCKET_WEBHOOK_SECRET is not configured");
     return new Response("Shiprocket webhook is not configured", { status: 503 });
   }
-  if (!suppliedSecret || !safeEqual(suppliedSecret, configuredSecret)) {
-    await recordWebhookDiagnostic("webhook.shiprocket.rejected", "Rejected: invalid webhook token");
+  if (!credentialCandidates.some((candidate) => safeEqual(candidate, configuredSecret))) {
+    const credentialHeaderNames = [...request.headers.keys()].filter((name) => /auth|key|secret|token|webhook/i.test(name));
+    await recordWebhookDiagnostic("webhook.shiprocket.rejected", `Rejected: configured token was not found in request headers${credentialHeaderNames.length ? ` (${credentialHeaderNames.join(", ")})` : ""}`);
     return new Response("Invalid Shiprocket webhook token", { status: 401 });
   }
 

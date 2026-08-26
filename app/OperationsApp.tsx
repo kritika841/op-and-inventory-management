@@ -178,8 +178,8 @@ export default function OperationsApp() {
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [workspaceOpen, setWorkspaceOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [fulfillmentLoading, setFulfillmentLoading] = useState(false);
   const [fulfillmentLoadError, setFulfillmentLoadError] = useState("");
+  const fulfillmentInFlightRef = useRef(new Set<FulfillmentQueueKey>());
   const loadInFlightRef = useRef<Promise<void> | null>(null);
 
   const load = useCallback(async (preserveLoadedOrders = false) => {
@@ -228,13 +228,14 @@ export default function OperationsApp() {
   useOrderEvents(() => load(view === "fulfillment").catch(() => undefined));
 
   const loadMoreFulfillmentOrders = useCallback(async (queue: FulfillmentQueueKey, offset: number): Promise<FulfillmentQueuePage | null> => {
-    if (fulfillmentLoading) return null;
-    setFulfillmentLoading(true);
+    if (fulfillmentInFlightRef.current.has(queue)) return null;
+    fulfillmentInFlightRef.current.add(queue);
     setFulfillmentLoadError("");
     const controller = new AbortController();
-    const timeout = window.setTimeout(() => controller.abort(), 20_000);
+    const timeout = window.setTimeout(() => controller.abort(), 45_000);
     try {
-      const response = await fetch(`/api/state?scope=orders&queue=${encodeURIComponent(queue)}&limit=75&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
+      const pageSize = offset === 0 ? 25 : 75;
+      const response = await fetch(`/api/state?scope=orders&queue=${encodeURIComponent(queue)}&limit=${pageSize}&offset=${offset}`, { cache: "no-store", credentials: "same-origin", signal: controller.signal });
       if (response.status === 401) { window.location.href = "/login"; return null; }
       if (!response.ok) throw new Error("Could not load the next fulfillment page");
       const snapshot = await response.json() as DashboardSnapshot;
@@ -251,9 +252,9 @@ export default function OperationsApp() {
       return null;
     } finally {
       window.clearTimeout(timeout);
-      setFulfillmentLoading(false);
+      fulfillmentInFlightRef.current.delete(queue);
     }
-  }, [fulfillmentLoading]);
+  }, []);
 
   async function request(path: string, options: RequestInit, success: string, timeoutMs = 30_000) {
     setBusy(path);
@@ -427,7 +428,7 @@ export default function OperationsApp() {
           {activeView === "overview" && <Overview data={data} orders={data.orders} onNavigate={(v) => setView(v)} />}
           {activeView === "orders" && <Orders orders={searchedOrders} users={data.users} role={role} generatedAt={data.generatedAt} onAction={orderAction} />}
           {activeView === "confirmation" && <Confirmation data={data} orders={searchedOrders} users={data.users} campaigns={data.campaigns} currentUser={data.currentUser} onAction={orderAction} onCampaignAssign={campaignAction} onAdminAction={confirmationAdminAction} onIntegrationSync={integrationSyncAction} />}
-          {activeView === "fulfillment" && <Fulfillment data={data} orders={searchedOrders} role={role} onAction={orderAction} onUpload={uploadLabel} onPackaging={confirmPackaging} onIntegrationSync={integrationSyncAction} loadingMore={fulfillmentLoading} loadMoreError={fulfillmentLoadError} onLoadMore={loadMoreFulfillmentOrders} />}
+          {activeView === "fulfillment" && <Fulfillment data={data} orders={searchedOrders} role={role} onAction={orderAction} onUpload={uploadLabel} onPackaging={confirmPackaging} onIntegrationSync={integrationSyncAction} loadMoreError={fulfillmentLoadError} onLoadMore={loadMoreFulfillmentOrders} />}
           {activeView === "inventory" && <Inventory data={data} role={role} onAdjust={inventoryRequest} onImport={importStock} onBulkSet={(items) => request("/api/inventory/bulk", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ items }) }, "Bulk inventory count saved")} />}
           {activeView === "setup" && <ProductSetup data={data} onRequest={request} />}
           {activeView === "rto" && <Rto data={data} role={role} query={query} onQc={submitQc} />}
@@ -1213,7 +1214,7 @@ function confirmationPhone(order: OrderView, orders: OrderView[]) {
   return matchingOrder?.customerPhone || "Phone unavailable in synced data";
 }
 
-function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIntegrationSync, loadingMore, loadMoreError, onLoadMore: loadQueuePage }: { data: DashboardSnapshot; orders: OrderView[]; role: DashboardSnapshot["currentUser"]["role"]; onAction: (id: string, action: string, payload?: Record<string, unknown>, success?: string) => Promise<void>; onUpload: (id: string, file: File) => Promise<void>; onPackaging: (id: string, lines: Array<{ componentId: string; quantity: number }>) => Promise<void>; onIntegrationSync: (success?: string) => Promise<void>; loadingMore: boolean; loadMoreError: string; onLoadMore: (queue: FulfillmentQueueKey, offset: number) => Promise<FulfillmentQueuePage | null> }) {
+function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIntegrationSync, loadMoreError, onLoadMore: loadQueuePage }: { data: DashboardSnapshot; orders: OrderView[]; role: DashboardSnapshot["currentUser"]["role"]; onAction: (id: string, action: string, payload?: Record<string, unknown>, success?: string) => Promise<void>; onUpload: (id: string, file: File) => Promise<void>; onPackaging: (id: string, lines: Array<{ componentId: string; quantity: number }>) => Promise<void>; onIntegrationSync: (success?: string) => Promise<void>; loadMoreError: string; onLoadMore: (queue: FulfillmentQueueKey, offset: number) => Promise<FulfillmentQueuePage | null> }) {
   const canOperate = ["ADMIN", "MANAGER", "OPERATIONS"].includes(role);
   const canHandoff = ["ADMIN", "MANAGER", "WAREHOUSE"].includes(role);
   const boxes = data.inventory.filter((item) => item.componentType === "COURIER_BOX");
@@ -1227,6 +1228,7 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
     "confirmed-orders": { initialized: false, nextOffset: 0, hasMore: true },
     all: { initialized: false, nextOffset: 0, hasMore: true },
   });
+  const [queueLoading, setQueueLoading] = useState<Record<FulfillmentQueueKey, boolean>>({ "new-orders": false, "labels-generated": false, shipped: false, "confirmed-orders": false, all: false });
   const [selected, setSelected] = useState<string[]>([]);
   const [manifesting, setManifesting] = useState(false);
   const [queueSearch, setQueueSearch] = useState("");
@@ -1241,13 +1243,19 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
   const tableScrollRef = useRef<HTMLDivElement | null>(null);
   const nextPageRef = useRef<HTMLTableRowElement | null>(null);
   const activePage = queuePages[activeQueue];
+  const loadingMore = queueLoading[activeQueue];
   const requestNextPage = useCallback(async (queue = activeQueue) => {
     const current = queuePages[queue];
-    if (loadingMore || (current.initialized && !current.hasMore)) return;
-    const page = await loadQueuePage(queue, current.initialized ? current.nextOffset : 0);
-    if (!page) return;
-    setQueuePages((pages) => ({ ...pages, [queue]: { initialized: true, nextOffset: page.nextOffset, hasMore: page.hasMore } }));
-  }, [activeQueue, loadingMore, loadQueuePage, queuePages]);
+    if (queueLoading[queue] || (current.initialized && !current.hasMore)) return;
+    setQueueLoading((loading) => ({ ...loading, [queue]: true }));
+    try {
+      const page = await loadQueuePage(queue, current.initialized ? current.nextOffset : 0);
+      if (!page) return;
+      setQueuePages((pages) => ({ ...pages, [queue]: { initialized: true, nextOffset: page.nextOffset, hasMore: page.hasMore } }));
+    } finally {
+      setQueueLoading((loading) => ({ ...loading, [queue]: false }));
+    }
+  }, [activeQueue, loadQueuePage, queueLoading, queuePages]);
   useEffect(() => {
     if (!bulkStatus) return;
     const timer = window.setTimeout(() => setBulkStatus(null), 5_000);
@@ -1323,6 +1331,11 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
   const activeQueueTotal = queueTotals[activeQueue];
   const hasMore = activePage.hasMore;
   const onLoadMore = () => { void requestNextPage(); };
+  const openQueue = (queue: FulfillmentQueueKey) => {
+    setActiveQueue(queue);
+    setSelected([]);
+    if (!queuePages[queue].initialized && !queueLoading[queue]) void requestNextPage(queue);
+  };
   const fulfillmentProductOptions = [...new Set(orders.flatMap((order) => order.lines.map((line) => line.name)).filter(Boolean))].sort((left, right) => left.localeCompare(right));
   const fulfillmentTagOptions = [...new Set(orders.flatMap((order) => order.shopifyTags).map((tag) => tag.trim()).filter(Boolean))].sort((left, right) => left.localeCompare(right));
   const parsedFilterOrderIds = filterOrderIds ? filterOrderIds.split(",") : [];
@@ -1402,11 +1415,11 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
   return <div className="fulfillment-layout fulfillment-workbench">
     <div className="fulfillment-filter-row">
     <div className="fulfillment-filter-tabs" role="tablist" aria-label="Fulfillment queues">
-      <button role="tab" aria-selected={activeQueue === "new-orders"} className={activeQueue === "new-orders" ? "active" : ""} onClick={() => { setActiveQueue("new-orders"); setSelected([]); }}><span>New orders</span><b>{data.fulfillmentCounts.newOrders}</b></button>
-      <button role="tab" aria-selected={activeQueue === "labels-generated"} className={activeQueue === "labels-generated" ? "active" : ""} onClick={() => { setActiveQueue("labels-generated"); setSelected([]); }}><span>Labels Generated</span><b>{data.fulfillmentCounts.labelsGenerated}</b></button>
-      <button role="tab" aria-selected={activeQueue === "shipped"} className={activeQueue === "shipped" ? "active" : ""} onClick={() => { setActiveQueue("shipped"); setSelected([]); }}><span>Shipped</span><b>{data.fulfillmentCounts.shipped}</b></button>
-      <button role="tab" aria-selected={activeQueue === "confirmed-orders"} className={activeQueue === "confirmed-orders" ? "active" : ""} onClick={() => { setActiveQueue("confirmed-orders"); setSelected([]); }}><span>Confirmed orders</span><b>{data.fulfillmentCounts.confirmedOrders}</b></button>
-      <button role="tab" aria-selected={activeQueue === "all"} className={activeQueue === "all" ? "active" : ""} onClick={() => { setActiveQueue("all"); setSelected([]); }}><span>All</span><b>{data.fulfillmentCounts.total}</b></button>
+      <button role="tab" aria-selected={activeQueue === "new-orders"} className={activeQueue === "new-orders" ? "active" : ""} onClick={() => openQueue("new-orders")}><span>New orders</span><b>{data.fulfillmentCounts.newOrders}</b></button>
+      <button role="tab" aria-selected={activeQueue === "labels-generated"} className={activeQueue === "labels-generated" ? "active" : ""} onClick={() => openQueue("labels-generated")}><span>Labels Generated</span><b>{data.fulfillmentCounts.labelsGenerated}</b></button>
+      <button role="tab" aria-selected={activeQueue === "shipped"} className={activeQueue === "shipped" ? "active" : ""} onClick={() => openQueue("shipped")}><span>Shipped</span><b>{data.fulfillmentCounts.shipped}</b></button>
+      <button role="tab" aria-selected={activeQueue === "confirmed-orders"} className={activeQueue === "confirmed-orders" ? "active" : ""} onClick={() => openQueue("confirmed-orders")}><span>Confirmed orders</span><b>{data.fulfillmentCounts.confirmedOrders}</b></button>
+      <button role="tab" aria-selected={activeQueue === "all"} className={activeQueue === "all" ? "active" : ""} onClick={() => openQueue("all")}><span>All</span><b>{data.fulfillmentCounts.total}</b></button>
     </div>
     <div className="fulfillment-filter-actions">
       <span className={orderFeedStale ? "fulfillment-sync-state warning" : integrationHealthy ? "fulfillment-sync-state healthy" : integrationSyncing ? "fulfillment-sync-state syncing" : "fulfillment-sync-state warning"} title={`${orderFeedLabel}\n${data.integrations.map((item) => `${item.provider}: ${item.detail || item.status}`).join("\n")} `}><i />{orderFeedStale ? orderFeedLabel : integrationSyncing ? "Syncing providers…" : integrationHealthy ? `Synced${lastIntegrationSync ? ` ${age(lastIntegrationSync)} ago` : ""}` : "Sync needs review"}</span>

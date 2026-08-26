@@ -71,6 +71,8 @@ test("provider webhooks fail closed and atomically claim deterministic receipts"
   assert.match(shopify, /DELETE FROM webhook_receipts/);
   assert.match(shiprocket, /status: 503/);
   assert.match(shiprocket, /safeEqual/);
+  assert.match(shiprocket, /request\.headers\.entries\(\)/);
+  assert.match(shiprocket, /configured token was not found in request headers/);
   assert.match(shiprocket, /shiprocket_.*sha256/);
   assert.match(shiprocket, /ON CONFLICT\(id\) DO NOTHING/);
   assert.match(shiprocket, /Unknown Shiprocket status/);
@@ -118,6 +120,8 @@ test("heavy state is split into protected paginated endpoints without polling re
   assert.match(ui, /75/);
   assert.match(ui, /activeQueueTotal/);
   assert.match(ui, /fulfillmentActivityMs/);
+  assert.match(ui, /const pageSize = offset === 0 \? 25 : 75/);
+  assert.match(ui, /const openQueue = \(queue: FulfillmentQueueKey\)/);
   assert.match(ui, /Shipment updated/);
   assert.match(state, /latest_shipment_event_at/);
   assert.match(state, /fulfillmentQueue === "shipped"/);
