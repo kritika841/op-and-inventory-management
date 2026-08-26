@@ -118,6 +118,9 @@ test("heavy state is split into protected paginated endpoints without polling re
   assert.match(ui, /75/);
   assert.match(ui, /activeQueueTotal/);
   assert.match(ui, /fulfillmentActivityMs/);
+  assert.match(ui, /Shipment updated/);
+  assert.match(state, /latest_shipment_event_at/);
+  assert.match(state, /fulfillmentQueue === "shipped"/);
   assert.doesNotMatch(ui, /loaded · \{activeQueueTotal\}/);
   assert.match(ui, /RTO initiated/);
   assert.match(ui, /RTO in transit/);

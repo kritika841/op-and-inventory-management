@@ -153,7 +153,9 @@ function orderMatchesSearch(order: OrderView, rawQuery: string) {
 function fulfillmentActivityMs(order: OrderView, queue: FulfillmentQueueKey) {
   const timestamps = queue === "new-orders"
     ? [order.createdAt]
-    : [order.updatedAt, order.pickedUpAt, order.manifestedAt, order.createdAt];
+    : queue === "shipped"
+      ? [order.latestShipmentEventAt, order.pickedUpAt, order.createdAt]
+      : [order.updatedAt, order.pickedUpAt, order.manifestedAt, order.createdAt];
   return Math.max(...timestamps.map((value) => validDate(value)?.getTime() ?? 0));
 }
 function detectInitialTheme(): "light" | "dark" {
@@ -1457,7 +1459,7 @@ function Fulfillment({ data, orders, role, onAction, onUpload, onPackaging, onIn
               <td className="fulfillment-sticky-order">
                 <div className="fulfillment-order-block">
                   <strong>{order.orderNumber}</strong>
-                  <span>{currency.format(order.amount / 100)} · {age(order.createdAt)}</span>
+                  <span>{currency.format(order.amount / 100)} · {activeQueue === "shipped" ? `Shipment updated ${age(order.latestShipmentEventAt || order.pickedUpAt || order.createdAt)} ago` : `${age(order.createdAt)} old`}</span>
                   <span>{order.lines.map((line) => `${line.quantity}x ${line.sku}`).join(", ")}</span>
                 </div>
               </td>

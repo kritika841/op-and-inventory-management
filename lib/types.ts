@@ -88,6 +88,7 @@ export interface OrderView {
   shipmentId: string | null;
   manifestedAt: string | null;
   pickedUpAt: string | null;
+  latestShipmentEventAt: string | null;
   autoCancelDeadline: string | null;
   courierAutoCancelDays: number | null;
   awb: string | null;
